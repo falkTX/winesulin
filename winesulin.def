@@ -1,0 +1,3 @@
+LIBRARY     winesulin
+DESCRIPTION 'winesulin'
+EXPORTS VSTPluginMain
