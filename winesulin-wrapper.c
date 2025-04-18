@@ -9,11 +9,15 @@
 
 #include <dlfcn.h>
 
+#define WINESULIN_CLASS_NAME "WineSuLin"
+#define WINESULIN_EFFECT_PROP_NAME "WineSuLinFxPtr"
+// #define WINESULIN_GUI_IS_EMBED
+#define WINESULIN_GUI_IS_SUPPORTED
+
+#ifdef WINESULIN_GUI_IS_SUPPORTED
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
-
-#define WINESULIN_CLASS_NAME "WineSuLin"
-#define WINESULIN_SUPPORTS_GUI
+#endif
 
 // --------------------------------------------------------------------------------------------------------------------
 // DllMain used to get catch attach instance, so we can get module filename later
@@ -41,17 +45,15 @@ typedef struct {
     LinuxEffect* linuxfx;
     LinuxWrappedVSTPluginMainFn linuxwrapper;
     WinHostCallback winHostCallback;
+   #ifdef WINESULIN_GUI_IS_SUPPORTED
     struct {
         Display* display;
         Window window;
-        Window child;
+        unsigned width, height;
         bool visible;
     } x11;
-    struct {
-        int x, y;
-        unsigned width, height;
-    } prev;
-    HWND hwnd, fullparent;
+    HWND hwnd, parent, fullparent;
+   #endif
 } CombinedEffect;
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -67,18 +69,17 @@ static intptr_t linuxHostCallback(LinuxEffect* linuxfx, int32_t opcode, int32_t 
 
     switch (opcode)
     {
-    // get time
-    case 7:
-        break;
-
     // size window
     case 15:
-       #ifdef WINESULIN_SUPPORTS_GUI
+       #ifdef WINESULIN_GUI_IS_SUPPORTED
         if (effect->x11.display != NULL && effect->x11.window != 0)
         {
-            effect->prev.width = index;
-            effect->prev.height = value;
+            effect->x11.width = index;
+            effect->x11.height = value;
             XResizeWindow(effect->x11.display, effect->x11.window, index, value);
+
+            for (XEvent event; XPending(effect->x11.display) != 0;)
+                XNextEvent(effect->x11.display, &event);
         }
         break;
        #endif
@@ -87,49 +88,64 @@ static intptr_t linuxHostCallback(LinuxEffect* linuxfx, int32_t opcode, int32_t 
     return effect->winHostCallback(effect, opcode, index, value, ptr, opt);
 }
 
+#ifdef WINESULIN_GUI_IS_SUPPORTED
+
 // --------------------------------------------------------------------------------------------------------------------
+// Window move event hook
 
-static LRESULT CALLBACK wndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+static void CALLBACK winMoveEventHook(HWINEVENTHOOK hook,
+                                      DWORD event,
+                                      HWND hwnd,
+                                      LONG idObject,
+                                      LONG idChild,
+                                      DWORD idEventThread,
+                                      DWORD time)
 {
-    CombinedEffect* effect = (CombinedEffect*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    if (event != EVENT_OBJECT_LOCATIONCHANGE)
+        return;
+    if (idObject != OBJID_WINDOW)
+        return;
+    if (idChild != CHILDID_SELF)
+        return;
 
-    if (effect != NULL && hwnd == effect->hwnd)
+    CombinedEffect* effect = (CombinedEffect*)GetPropA(hwnd, WINESULIN_EFFECT_PROP_NAME);
+    if (effect == NULL)
+        return;
+
+    RECT rect;
+    RECT offset = { 0 };
+    if (GetWindowRect(effect->hwnd, &rect))
     {
-        // fprintf(stderr, "[winesulin] wndProc | %p %x %lu %lu | %p\n", hwnd, uMsg, wParam, lParam, effect);
+        if (effect->fullparent != NULL && effect->fullparent != effect->hwnd)
+            GetWindowRect(effect->fullparent, &offset);
 
-        if (uMsg == WM_TIMER)
-        {
-#if 0
-            RECT rect = { 0 };
+       #ifdef WINESULIN_GUI_IS_EMBED
+        const int x = rect.left - offset.left;
+        const int y = rect.top - offset.top;
+       #else
+        const int x = rect.left;
+        const int y = rect.top;
+       #endif
 
-            if (GetWindowRect(hwnd, &rect))
-            {
-                fprintf(stderr, "[winesulin] wndProc | %p %x %lu %lu -> %d %d %d %d\n",
-                        hwnd, uMsg, wParam, lParam, rect.top, rect.left, rect.right, rect.bottom);
+        XMoveWindow(effect->x11.display, effect->x11.window, x, y);
 
-                XMoveWindow(effect->x11.display, effect->x11.window, rect.left, rect.top);
-            }
-#endif
-        }
+        for (XEvent event; XPending(effect->x11.display) != 0;)
+            XNextEvent(effect->x11.display, &event);
     }
-
-    return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
-static int sWindowClassRefCounter = 0;
+// --------------------------------------------------------------------------------------------------------------------
+// Window class management
 
 static void registerWindowClass()
 {
-    if (++sWindowClassRefCounter != 1)
-        return;
-
     WNDCLASSEXA windowClass = { 0 };
-//     if (GetClassInfoExA(sInstance, WINESULIN_CLASS_NAME, &windowClass))
-//         return; // Already registered
+    if (GetClassInfoExA(sInstance, WINESULIN_CLASS_NAME, &windowClass))
+        return; // Already registered
 
     windowClass.cbSize        = sizeof(windowClass);
     windowClass.style         = CS_OWNDC;
-    windowClass.lpfnWndProc   = wndProc;
+    windowClass.lpfnWndProc   = DefWindowProc;
     windowClass.hInstance     = sInstance;
     windowClass.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
     windowClass.hCursor       = LoadCursor(NULL, IDC_ARROW);
@@ -140,9 +156,6 @@ static void registerWindowClass()
 
 static void unregisterWindowClass()
 {
-    if (--sWindowClassRefCounter != 0)
-        return;
-
     UnregisterClassA(WINESULIN_CLASS_NAME, NULL);
 }
 
@@ -150,23 +163,13 @@ static void unregisterWindowClass()
 
 static intptr_t createWindow(CombinedEffect* effect, HWND parent)
 {
-    const int16_t width = effect->prev.width ?: 1;
-    const int16_t height = effect->prev.height ?: 1;
+    const int16_t width = effect->x11.width ?: 1;
+    const int16_t height = effect->x11.height ?: 1;
 
     if (effect->hwnd == NULL)
     {
         registerWindowClass();
 
-#if 0
-        effect->hwnd = CreateWindowExA(WS_EX_NOINHERITLAYOUT | WS_EX_TOOLWINDOW,
-                                        WINESULIN_CLASS_NAME,
-                                        WINESULIN_CLASS_NAME,
-                                        "External",
-                                        WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-                                        CW_USEDEFAULT, CW_USEDEFAULT,
-                                        width, height,
-                                        NULL, NULL, sInstance, NULL);
-#endif
         effect->hwnd = CreateWindowExA(WS_EX_NOINHERITLAYOUT,
                                        WINESULIN_CLASS_NAME,
                                        WINESULIN_CLASS_NAME,
@@ -193,9 +196,10 @@ static intptr_t createWindow(CombinedEffect* effect, HWND parent)
         fullparent = GetParent(fullparent);
     }
 
+    effect->parent = parent;
     effect->fullparent = fullparent;
-    const Window fullwindow = (Window)GetPropA(fullparent, "__wine_x11_whole_window");
 
+    const Window fullwindow = (Window)GetPropA(fullparent, "__wine_x11_whole_window");
     fprintf(stderr, "[winesulin] DEBUG WINDOW %p -> %p -> %lu\n", parent, fullparent, fullwindow);
 
     if (effect->x11.display == NULL)
@@ -214,15 +218,20 @@ static intptr_t createWindow(CombinedEffect* effect, HWND parent)
         const int screen = DefaultScreen(effect->x11.display);
 
         XSetWindowAttributes attr = { 0 };
-        attr.event_mask = KeyPressMask|KeyReleaseMask|FocusChangeMask;
+        attr.border_pixel = 0;
+        attr.background_pixel = 0;
+// //         attr.override_redirect = TRUE;
 
         effect->x11.window = XCreateWindow(effect->x11.display,
-                                           fullwindow ?: RootWindow(effect->x11.display, screen),
+                                          #ifdef WINESULIN_GUI_IS_EMBED
+                                           fullwindow ?:
+                                          #endif
+                                           RootWindow(effect->x11.display, screen),
                                            0, 0, width, height, 0,
                                            DefaultDepth(effect->x11.display, screen),
                                            InputOutput,
                                            DefaultVisual(effect->x11.display, screen),
-                                           CWColormap | CWEventMask,
+                                           CWBorderPixel | CWBackPixel,
                                            &attr);
 
         if (effect->x11.window == 0)
@@ -234,9 +243,17 @@ static intptr_t createWindow(CombinedEffect* effect, HWND parent)
 
     ShowWindow(effect->hwnd, SW_HIDE);
     // ShowWindow(effect->hwnd, SW_SHOW);
-    // SetParent(effect->hwnd, ptr);
-    SetWindowLongPtrA(effect->hwnd, GWLP_USERDATA, (LONG_PTR)effect);
-    // SetTimer(effect->hwnd, 0, 33, wndProc);
+    SetPropA(effect->fullparent, WINESULIN_EFFECT_PROP_NAME, effect);
+
+    DWORD processId;
+    DWORD threadId = GetWindowThreadProcessId(effect->hwnd, &processId);
+    SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE,
+                    EVENT_OBJECT_LOCATIONCHANGE,
+                    NULL,
+                    winMoveEventHook,
+                    processId,
+                    threadId,
+                    WINEVENT_OUTOFCONTEXT);
 
     XStoreName(effect->x11.display, effect->x11.window, WINESULIN_CLASS_NAME);
 
@@ -245,29 +262,44 @@ static intptr_t createWindow(CombinedEffect* effect, HWND parent)
         XSetWMProtocols(effect->x11.display, effect->x11.window, &wmDelete, 1);
     }
 
+   #ifdef WINESULIN_GUI_IS_EMBED
+    if (fullwindow == 0)
+   #endif
     {
         const Atom windowType = XInternAtom(effect->x11.display, "_NET_WM_WINDOW_TYPE", False);
-        const Atom windowTypeUtil = XInternAtom(effect->x11.display, "_NET_WM_WINDOW_TYPE_NORMAL", False);
+        const Atom windowTypes[] = {
+            XInternAtom(effect->x11.display, "_NET_WM_WINDOW_TYPE_NORMAL", False),
+            XInternAtom(effect->x11.display, "_NET_WM_WINDOW_TYPE_UTILITY", False),
+        };
         XChangeProperty(effect->x11.display,
                         effect->x11.window,
                         windowType,
                         XA_ATOM,
                         32,
                         PropModeReplace,
-                        (const unsigned char*)&windowTypeUtil,
-                        2);
-    }
+                        (const unsigned char*)windowTypes,
+                        sizeof(windowTypes)/sizeof(windowTypes[0]));
 
-    // XSetTransientForHint(effect->x11.display, fullwindow, effect->x11.window);
+        const unsigned long wmHints[] = {
+            2, 0, 0, 0, 0,
+        };
+        const Atom motifWmHints = XInternAtom(effect->x11.display, "_MOTIF_WM_HINTS", False);
+        XChangeProperty(effect->x11.display,
+                        effect->x11.window,
+                        motifWmHints,
+                        motifWmHints,
+                        32,
+                        PropModeReplace,
+                        (const unsigned char *)wmHints,
+                        sizeof(wmHints)/sizeof(wmHints[0]));
+
+        if (fullwindow != 0)
+            XSetTransientForHint(effect->x11.display, effect->x11.window, fullwindow);
+    }
 
     XFlush(effect->x11.display);
 
-    const intptr_t ret = effect->linuxfx->dispatcher(effect->linuxfx, 14, 0, 0, (void*)effect->x11.window, 0.f);
-
-    // TODO reparent
-
-    return ret;
-
+    return effect->linuxfx->dispatcher(effect->linuxfx, 14, 0, 0, (void*)effect->x11.window, 0.f);
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -287,7 +319,7 @@ static intptr_t destroyWindow(CombinedEffect* effect)
     unregisterWindowClass();
 
     XDestroyWindow(effect->x11.display, effect->x11.window);
-    effect->x11.window = effect->x11.child = 0;
+    effect->x11.window = 0;
     effect->x11.visible = false;
 
     XCloseDisplay(effect->x11.display);
@@ -300,68 +332,53 @@ static intptr_t destroyWindow(CombinedEffect* effect)
 
 static intptr_t idleWindow(CombinedEffect* effect)
 {
-    if (effect->x11.display == NULL || effect->x11.window == 0 || effect->hwnd == NULL)
+    if (effect->x11.display == NULL || effect->x11.window == 0 || effect->hwnd == NULL || effect->parent == NULL)
     {
         fprintf(stderr, "[winesulin] Idle with bad setup!\n");
         return 0;
     }
 
-    RECT rect;
-    RECT offset = { 0 };
-    if (GetWindowRect(effect->hwnd, &rect))
     {
-        if (effect->fullparent != NULL && effect->fullparent != effect->hwnd)
-            GetWindowRect(effect->fullparent, &offset);
-
-        const int x = rect.left - offset.left;
-        const int y = rect.top - offset.top;
-
-        if (effect->prev.x != x || effect->prev.y != y)
+        int x, y;
+        RECT rect;
+        RECT offset = { 0 };
+        if (GetWindowRect(effect->hwnd, &rect))
         {
-            effect->prev.x = x;
-            effect->prev.y = y;
-            XMoveWindow(effect->x11.display, effect->x11.window, x, y);
+            if (effect->fullparent != NULL && effect->fullparent != effect->hwnd)
+                GetWindowRect(effect->fullparent, &offset);
+
+           #ifdef WINESULIN_GUI_IS_EMBED
+            x = rect.left - offset.left;
+            y = rect.top - offset.top;
+           #else
+            x = rect.left;
+            y = rect.top;
+           #endif
+        }
+        else
+        {
+            x = y = 0;
+        }
+
+        XMoveWindow(effect->x11.display, effect->x11.window, x, y);
+        // XMoveResizeWindow(effect->x11.display, effect->x11.window, x, y, effect->x11.width, effect->x11.height);
+    }
+
+    if (IsWindowVisible(effect->parent))
+    {
+        if (! effect->x11.visible)
+        {
+            XMapRaised(effect->x11.display, effect->x11.window);
+            effect->x11.visible = true;
         }
     }
-
-    if (! effect->x11.visible)
+    else
     {
-        effect->x11.visible = true;
-        XMoveResizeWindow(effect->x11.display,
-                          effect->x11.window,
-                          effect->prev.x,
-                          effect->prev.y,
-                          effect->prev.width,
-                          effect->prev.height);
-        XMapRaised(effect->x11.display, effect->x11.window);
-    }
-    else if (effect->x11.child == 0)
-    {
-        Window rootWindow, parentWindow;
-        Window* childWindows = NULL;
-        unsigned numChildren = 0;
-
-        XQueryTree(effect->x11.display, effect->x11.window, &rootWindow, &parentWindow, &childWindows, &numChildren);
-
-        if (numChildren > 0 && childWindows != NULL)
+        if (effect->x11.visible)
         {
-            effect->x11.child = childWindows[0];
-            XFree(childWindows);
+            XUnmapWindow(effect->x11.display, effect->x11.window);
+            effect->x11.visible = false;
         }
-    }
-
-    if (effect->x11.child != 0)
-    {
-        XEvent xev = { 0 };
-        xev.xexpose.type    = Expose;
-        xev.xexpose.serial  = 0;
-        xev.xexpose.display = effect->x11.display;
-        xev.xexpose.window  = effect->x11.child;
-        xev.xexpose.x       = 0; // effect->prev.x;
-        xev.xexpose.y       = 0; // effect->prev.y;
-        xev.xexpose.width   = effect->prev.width;
-        xev.xexpose.height  = effect->prev.height;
-        XSendEvent(effect->x11.display, effect->x11.child, False, 0, &xev);
     }
 
     for (XEvent event; XPending(effect->x11.display) != 0;)
@@ -370,6 +387,8 @@ static intptr_t idleWindow(CombinedEffect* effect)
     return effect->linuxfx->dispatcher(effect->linuxfx, 19, 0, 0, 0, 0.f);
 }
 
+#endif // WINESULIN_GUI_IS_SUPPORTED
+
 // --------------------------------------------------------------------------------------------------------------------
 
 static intptr_t __cdecl win_dispatcher(CombinedEffect* effect, int32_t opcode, int32_t index, intptr_t value, void* ptr, float opt)
@@ -377,7 +396,7 @@ static intptr_t __cdecl win_dispatcher(CombinedEffect* effect, int32_t opcode, i
     if (effect == NULL)
         return 0;
 
-    if (opcode != 19)
+    if (opcode != 19 && opcode != 25)
         printf("%s %d %d %ld %p %f\n", __FUNCTION__, opcode, index, value, ptr, opt);
 
     intptr_t ret;
@@ -386,20 +405,22 @@ static intptr_t __cdecl win_dispatcher(CombinedEffect* effect, int32_t opcode, i
     {
     // close
     case 1:
+       #ifdef WINESULIN_GUI_IS_SUPPORTED
         destroyWindow(effect);
+       #endif
         ret = effect->linuxfx->dispatcher(effect->linuxfx, opcode, index, value, ptr, opt);
         free(effect);
         return ret;
 
-   #ifdef WINESULIN_SUPPORTS_GUI
+   #ifdef WINESULIN_GUI_IS_SUPPORTED
     case 13:
         if (ptr != NULL)
         {
             ret = effect->linuxfx->dispatcher(effect->linuxfx, opcode, index, value, ptr, opt);
             typedef int16_t rect4[4];
             rect4* const r = *(rect4**)ptr;
-            effect->prev.width = (*r)[3] - (*r)[1];
-            effect->prev.height = (*r)[2] - (*r)[0];
+            effect->x11.width = (*r)[3] - (*r)[1];
+            effect->x11.height = (*r)[2] - (*r)[0];
             return ret;
         }
         return 0;
@@ -555,7 +576,7 @@ void* __cdecl VSTPluginMain(WinHostCallback winHostCallback)
     // use "host" pointer on linux side to store our custom effect instance
     linuxfx->hostPtr1 = effect;
 
-   #ifndef WINESULIN_SUPPORTS_GUI
+   #ifndef WINESULIN_GUI_IS_SUPPORTED
     // no editor
     effect->winfx.flags &= ~1;
    #endif
