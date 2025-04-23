@@ -44,7 +44,7 @@ typedef void* (__cdecl *WinVSTPluginMainFn)(WinHostCallback);
 // Linux and Windows effect data structures
 
 #define EFFECT_RESERVED_SIZE (11 * sizeof(int32_t) + 4 * sizeof(void*))
-#define EFFECT_PADDING 64
+#define EFFECT_PADDING 56
 
 #pragma pack(push, 8)
 
@@ -69,6 +69,7 @@ typedef struct {
     int32_t unique_id;
     int32_t version;
     void (*processReplacing)(void*, float**, float**, int32_t);
+    void (*processDoubleReplacing)(void*, double**, double**, int32_t);
     uint8_t padding[EFFECT_PADDING];
 } LinuxEffect;
 
@@ -93,6 +94,7 @@ typedef struct {
     int32_t unique_id;
     int32_t version;
     void (__cdecl *processReplacing)(void*, float**, float**, int32_t);
+    void (__cdecl *processDoubleReplacing)(void*, double**, double**, int32_t);
     uint8_t padding[EFFECT_PADDING];
 } WinEffect;
 

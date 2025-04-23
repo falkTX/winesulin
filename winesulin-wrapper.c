@@ -62,6 +62,8 @@ typedef struct {
 
 static intptr_t linuxHostCallback(LinuxEffect* linuxfx, int32_t opcode, int32_t index, intptr_t value, void* ptr, float opt)
 {
+    fprintf(stderr, "%s\n", __FUNCTION__);
+
     if (linuxfx == NULL)
         return sWinHostCallback != NULL ? sWinHostCallback(NULL, opcode, index, value, ptr, opt) : 0;
 
@@ -101,6 +103,8 @@ static void CALLBACK winMoveEventHook(HWINEVENTHOOK hook,
                                       DWORD idEventThread,
                                       DWORD time)
 {
+    fprintf(stderr, "%s\n", __FUNCTION__);
+
     if (event != EVENT_OBJECT_LOCATIONCHANGE)
         return;
     if (idObject != OBJID_WINDOW)
@@ -132,6 +136,8 @@ static void CALLBACK winMoveEventHook(HWINEVENTHOOK hook,
         for (XEvent event; XPending(effect->x11.display) != 0;)
             XNextEvent(effect->x11.display, &event);
     }
+
+    fprintf(stderr, "%s END\n", __FUNCTION__);
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -139,6 +145,8 @@ static void CALLBACK winMoveEventHook(HWINEVENTHOOK hook,
 
 static void registerWindowClass()
 {
+    fprintf(stderr, "%s\n", __FUNCTION__);
+
     WNDCLASSEXA windowClass = { 0 };
     if (GetClassInfoExA(sInstance, WINESULIN_CLASS_NAME, &windowClass))
         return; // Already registered
@@ -156,6 +164,8 @@ static void registerWindowClass()
 
 static void unregisterWindowClass()
 {
+    fprintf(stderr, "%s\n", __FUNCTION__);
+
     UnregisterClassA(WINESULIN_CLASS_NAME, NULL);
 }
 
@@ -163,6 +173,8 @@ static void unregisterWindowClass()
 
 static intptr_t createWindow(CombinedEffect* effect, HWND parent)
 {
+    fprintf(stderr, "%s\n", __FUNCTION__);
+
     const int16_t width = effect->x11.width ?: 1;
     const int16_t height = effect->x11.height ?: 1;
 
@@ -220,7 +232,6 @@ static intptr_t createWindow(CombinedEffect* effect, HWND parent)
         XSetWindowAttributes attr = { 0 };
         attr.border_pixel = 0;
         attr.background_pixel = 0;
-// //         attr.override_redirect = TRUE;
 
         effect->x11.window = XCreateWindow(effect->x11.display,
                                           #ifdef WINESULIN_GUI_IS_EMBED
@@ -306,6 +317,8 @@ static intptr_t createWindow(CombinedEffect* effect, HWND parent)
 
 static intptr_t destroyWindow(CombinedEffect* effect)
 {
+    fprintf(stderr, "%s\n", __FUNCTION__);
+
     if (effect->x11.display == NULL || effect->x11.window == 0 || effect->hwnd == NULL)
         return 0;
 
@@ -332,6 +345,8 @@ static intptr_t destroyWindow(CombinedEffect* effect)
 
 static intptr_t idleWindow(CombinedEffect* effect)
 {
+    // fprintf(stderr, "%s\n", __FUNCTION__);
+
     if (effect->x11.display == NULL || effect->x11.window == 0 || effect->hwnd == NULL || effect->parent == NULL)
     {
         fprintf(stderr, "[winesulin] Idle with bad setup!\n");
@@ -396,8 +411,11 @@ static intptr_t __cdecl win_dispatcher(CombinedEffect* effect, int32_t opcode, i
     if (effect == NULL)
         return 0;
 
-    if (opcode != 19 && opcode != 25)
-        printf("%s %d %d %ld %p %f\n", __FUNCTION__, opcode, index, value, ptr, opt);
+//     if (opcode == 19 || opcode == 25)
+//         return 0;
+
+//     if (opcode != 19 && opcode != 25)
+        fprintf(stderr, "%s %d %d %ld %p %f\n", __FUNCTION__, opcode, index, value, ptr, opt);
 
     intptr_t ret;
 
@@ -449,26 +467,32 @@ static intptr_t __cdecl win_dispatcher(CombinedEffect* effect, int32_t opcode, i
 
 static float __cdecl win_getParameter(CombinedEffect* effect, int32_t index)
 {
-    printf("%s\n", __FUNCTION__);
+    fprintf(stderr, "%s\n", __FUNCTION__);
     return effect->linuxfx->getParameter(effect->linuxfx, index);
 }
 
 static void __cdecl win_setParameter(CombinedEffect* effect, int32_t index, float value)
 {
-    printf("%s\n", __FUNCTION__);
+    fprintf(stderr, "%s\n", __FUNCTION__);
     effect->linuxfx->setParameter(effect->linuxfx, index, value);
 }
 
 static void __cdecl win_process(CombinedEffect* effect, float** inputs, float** outputs, int32_t sampleFrames)
 {
-    printf("%s\n", __FUNCTION__);
+    fprintf(stderr, "%s\n", __FUNCTION__);
     effect->linuxfx->process(effect->linuxfx, inputs, outputs, sampleFrames);
 }
 
 static void __cdecl win_processReplacing(CombinedEffect* effect, float** inputs, float** outputs, int32_t sampleFrames)
 {
-//     printf("%s\n", __FUNCTION__);
+    // fprintf(stderr, "%s\n", __FUNCTION__);
     effect->linuxfx->processReplacing(effect->linuxfx, inputs, outputs, sampleFrames);
+}
+
+static void __cdecl win_processDoubleReplacing(CombinedEffect* effect, double** inputs, double** outputs, int32_t sampleFrames)
+{
+    // fprintf(stderr, "%s\n", __FUNCTION__);
+    effect->linuxfx->processDoubleReplacing(effect->linuxfx, inputs, outputs, sampleFrames);
 }
 
 // --------------------------------------------------------------------------------------------------------------------
@@ -572,6 +596,7 @@ void* __cdecl VSTPluginMain(WinHostCallback winHostCallback)
     effect->winfx.setParameter     = win_setParameter;
     effect->winfx.process          = win_process;
     effect->winfx.processReplacing = win_processReplacing;
+    effect->winfx.processDoubleReplacing = win_processDoubleReplacing;
 
     // use "host" pointer on linux side to store our custom effect instance
     linuxfx->hostPtr1 = effect;
